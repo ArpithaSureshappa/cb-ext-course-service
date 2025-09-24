@@ -1,5 +1,7 @@
 package com.igot.cb.service;
 
+import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.time.*;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -14,6 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import com.igot.cb.elasticsearch.service.EsUtilService;
+import com.igot.cb.model.CbPlanDto;
 import org.apache.commons.collections4.MapUtils;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -143,7 +146,6 @@ public class AccessSettingMigrationServiceImpl {
                 cbPlanV2Map.put(Constants.ORG_ID_LIST, Collections.singletonList(orgId));
                 cbPlanV2Map.put(Constants.CREATED_AT, (Instant) cbPlanMap.get(Constants.CREATED_AT_KEY));
                 cbPlanV2Map.put(Constants.CREATED_BY, (String) cbPlanMap.get(Constants.CREATED_BY));
-                cbPlanV2Map.put(Constants.DRAFT_DATA_KEY, (String) cbPlanMap.get(Constants.DRAFT_DATA));
 
                 Boolean isApar = (Boolean) cbPlanMap.get(Constants.IS_APAR);
                 cbPlanV2Map.put(Constants.IS_APAR, isApar != null ? isApar : Boolean.FALSE);
@@ -161,7 +163,20 @@ public class AccessSettingMigrationServiceImpl {
                     log.error("Failed to build context data for planId: {}", cbPlanId);
                     continue;
                 }
-                cbPlanV2Map.put(Constants.CONTEXT_DATA, contextData);
+                cbPlanV2Map.put(Constants.CONTEXT_DATA_KEY, contextData);
+                if (Constants.DRAFT.equalsIgnoreCase(status)) {
+                    Map<String, Object> normalizedMap = sanitizeForElastic(cbPlanV2Map);
+                    Object ctx = normalizedMap.get("contextData");
+                    if (ctx instanceof String) {
+                        Map<String, Object> ctxMap = objectMapper.readValue((String) ctx, new TypeReference<Map<String,Object>>() {});
+                        normalizedMap.put("contextData", ctxMap);
+                    }
+
+                    CbPlanDto cbPlanDto = objectMapper.convertValue(normalizedMap, CbPlanDto.class);
+                    cbPlanV2Map.put(Constants.DRAFT_DATA_KEY, objectMapper.writeValueAsString(cbPlanDto));
+                }else{
+                    cbPlanV2Map.put(Constants.DRAFT_DATA_KEY, null);
+                }
                 ApiResponse dbResponse = (ApiResponse) cassandraOperation.insertRecord(Constants.KEYSPACE_SUNBIRD,
                         Constants.TABLE_CB_PLAN_V2, cbPlanV2Map);
                 if (Constants.SUCCESS.equalsIgnoreCase((String) dbResponse.get(Constants.RESPONSE))) {
@@ -434,10 +449,46 @@ public class AccessSettingMigrationServiceImpl {
                     cbPlanId, e.getMessage(), e);
         }
     }
+
+    public ApiResponse updateOrgScopeUpdateToSingle(String filePath) {
+        ApiResponse response = ApiResponse.createDefaultResponse("updateOrgScopeUpdateToSingle");
+        try (BufferedReader br = new BufferedReader(new FileReader(filePath))) {
+            String line;
+            br.readLine();
+            while ((line = br.readLine()) != null) {
+                String[] parts = line.split(",");
+                String orgId = parts[0].trim();
+                String id = parts[1].trim();
+                Map<String, Object> propertyMap = new HashMap<>();
+                propertyMap.put(Constants.PLAN_ID_RQST, id);
+                List<Map<String, Object>> cbPlanResponse = cassandraOperation.getRecordsByProperties(Constants.KEYSPACE_SUNBIRD,
+                        Constants.TABLE_CB_PLAN_V2, propertyMap, null, null);
+
+                if (!CollectionUtils.isEmpty(cbPlanResponse)) {
+                    Map<String, Object> cbPlanMap = cbPlanResponse.get(0);
+                    cbPlanMap.put(Constants.ORG_SCOPE, Constants.SINGLE);
+                    cbPlanMap.put(Constants.ORG_ID_LIST, List.of(orgId));
+                    String draftDataJson = (String) cbPlanMap.get(Constants.DRAFT_DATA);
+                    CbPlanDto cbPlanDto = objectMapper.readValue(draftDataJson, CbPlanDto.class);
+                    cbPlanDto.setOrgScope(Constants.SINGLE);
+                    cbPlanDto.setOrgIdList(List.of(orgId));
+                    cbPlanMap.put(Constants.DRAFT_DATA, objectMapper.writeValueAsString(cbPlanDto));
+                    cbPlanMap.remove(Constants.PLAN_ID);
+                    Map<String, Object> dbResponse = cassandraOperation.updateRecord(Constants.KEYSPACE_SUNBIRD,
+                            Constants.TABLE_CB_PLAN_V2, cbPlanMap, propertyMap);
+                    if (Constants.SUCCESS.equalsIgnoreCase((String) dbResponse.get(Constants.RESPONSE))) {
+                        cbPlanMap.put(Constants.ID, id);
+                        Map<String, Object> sanitizedMap = sanitizeForElastic(cbPlanMap);
+                        esUtilService.addDocument(cpPlanIndex, Constants.INDEX_TYPE, id, sanitizedMap, elasticCbPlanJsonPath);
+                        insertPlanToLookUpTable(id, orgId, (Instant) cbPlanMap.get(Constants.END_DATE_KEY), String.valueOf(cbPlanMap.get(Constants.STATUS)));
+                    }
+                }
+            }
+        } catch (JsonProcessingException ex) {
+            throw new RuntimeException(ex);
+        } catch (IOException ex) {
+            throw new RuntimeException(ex);
+        }
+        return response;
+    }
 }
-
-
-
-
-
-

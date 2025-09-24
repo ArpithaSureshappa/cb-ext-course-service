@@ -104,4 +104,12 @@ public class CbPlanWithAccessSettings {
         ApiResponse response = cbPlanLearnerService.getCBPlanListForUser(userOrgId, token, false);
         return new ResponseEntity<>(response, response.getResponseCode());
     }
+
+    @GetMapping("orgscope/update")
+    public ResponseEntity<ApiResponse> getCBPlanListForUser(
+            @RequestParam(name = "fileName", required = true) String fileName) throws Exception {
+
+        ApiResponse response = accessSettingMigrationService.updateOrgScopeUpdateToSingle(fileName);
+        return new ResponseEntity<>(response, response.getResponseCode());
+    }
 }
